@@ -15,5 +15,6 @@ dependencies = [
     "loguru>=0.7.3",
     "numexpr>=2.13.1",
     "pandas>=2.3.3",
+    "ragas>=0.3.7",
     "sentence-transformers>=5.1.1",
 ]
