@@ -1,4 +1,4 @@
-from src.ingestion import vector_store_setup
+from src.ingestion import initialize_databases
 from src.workflow import app, process_query
 from langchain.schema.runnable.config import RunnableConfig
 import chromadb
@@ -6,11 +6,10 @@ import chainlit as cl
 
 
 def initialize():
-    """Ingest documents"""
+    """Initialize vector store and DuckDB database"""
     client = chromadb.PersistentClient(path="./chroma_db")
-    print("passing")
-    vector_store_setup(client)
-    print("Ingestion complete.")
+    initialize_databases(client)
+    print("Database initialization complete.")
 
 def run_query(query):
     """Run a single query."""
@@ -47,10 +46,29 @@ async def on_message(message: cl.Message):
     # Process the query through the workflow
     result = app.invoke({"query": message.content}, config=config)
     
+    
+    
+    # Get response and sources
+    response = result["response"]
+    sources = result.get("sources", [])
+    contexts = result.get("contexts", [])
+    
+    
     # Send the response back to the UI
-    await cl.Message(content=result["response"]).send()
+    await cl.Message(content=response).send()
+    
+    # Display sources in an expandable step
+    if sources and contexts:
+        async with cl.Step(name="Sources") as step:
+            # step.input = "Retrieved Contexts"
+            source_text = ""
+            for idx, (source, context) in enumerate(zip(sources, contexts)):
+                source_text += f"### {idx+1}. {source}\n{context}\n\n"
+            step.output = source_text
+            await step.send()
 
  
 if __name__ == "__main__":
     initialize()
-    evaluation()
+    query = "List of cars Launched late than 2012?"
+    run_query(query)

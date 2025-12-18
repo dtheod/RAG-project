@@ -5,10 +5,16 @@ from src.agents import cars_agent, countries_agent, math_agent, general_agent, f
 from langchain.schema.runnable.config import RunnableConfig
 import chainlit as cl
 
+from typing import List
+
 class State(TypedDict):
     query: str
     category: str
     response: str
+    contexts: List[str]
+    sources: List[str]
+
+
 
 def route_query(state):
     """Route to appropriate agent based on category."""
