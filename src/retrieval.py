@@ -15,8 +15,10 @@ def search_cars_db(query, k=5):
     logger.info(f"Search results: {results}")
 
     
-    # Return just the documents for the agent to use
-    return results['documents'][0] if results['documents'] else []
+    # Return documents and metadata for the agent to use
+    if results['documents']:
+        return results['documents'][0], results['metadatas'][0]
+    return [], []
 
 
 def search_countries_db(query, k=5):
@@ -30,4 +32,6 @@ def search_countries_db(query, k=5):
     )
     logger.info(f"Search results: {results}")
     
-    return results['documents'][0] if results['documents'] else []
+    if results['documents']:
+        return results['documents'][0], results['metadatas'][0]
+    return [], []

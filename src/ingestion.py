@@ -1,4 +1,6 @@
 import pandas as pd
+import duckdb
+from pathlib import Path
 from docling.chunking import HybridChunker
 from docling.document_converter import DocumentConverter
 from src.models import embeddings
@@ -63,10 +65,8 @@ def ingest_cars(client):
         ids.append(f"car_{idx}")
     
     # Generate embeddings and add to collection
-    print("Generating embeddings...")
     embeds = embeddings.embed_documents(documents)
     
-    print("Adding documents to ChromaDB...")
     collection.upsert(
         embeddings=embeds,
         documents=documents,
@@ -104,15 +104,76 @@ def ingest_country_documents(client):
     return collection
 
 
-def vector_store_setup(client):
-    """Set up the vector store by ingesting datasets."""
+def load_cars_to_duckdb(db_path="duckdb_cars.db", csv_path="./data/cars_dataset.csv"):
+    """Load cars dataset into DuckDB database."""
+    
+    # Check if database already exists and has data
+    db_file = Path(db_path)
+    if db_file.exists():
+        conn = duckdb.connect(db_path)
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM cars").fetchone()[0]
+            if count > 0:
+                logger.info(f"DuckDB already exists with {count} rows. Skipping load.")
+                conn.close()
+                return
+        except:
+            # Table doesn't exist, continue with loading
+            pass
+        conn.close()
+    
+    # Load CSV into pandas
+    logger.info(f"Loading cars dataset from {csv_path} into DuckDB")
+    df = pd.read_csv(csv_path)
+    
+    # Connect to DuckDB and create table
+    conn = duckdb.connect(db_path)
+    
+    # Register the dataframe and create table
+    conn.execute("DROP TABLE IF EXISTS cars")
+    conn.execute("""
+        CREATE TABLE cars AS 
+        SELECT * FROM df
+    """)
+    
+    # Verify the load
+    count = conn.execute("SELECT COUNT(*) FROM cars").fetchone()[0]
+    logger.info(f"Successfully loaded {count} cars into DuckDB")
+    
+    conn.close()
+
+
+def initialize_databases(client):
+    """Initialize both ChromaDB vector store and DuckDB database."""
+    logger.info("Starting database initialization...")
+    
+    # Check and initialize ChromaDB
     collections = client.list_collections()
-    print(collections)
     if collections:
-        logger.info("Collections are already set")
+        logger.info("ChromaDB collections already exist")
     else:
-        logger.info("Collections are not set and need to be initialised")
+        logger.info("Initializing ChromaDB collections...")
         ingest_cars(client)
         ingest_country_documents(client)
-    return None
+    
+    # Check and initialize DuckDB
+    db_file = Path("duckdb_cars.db")
+    if db_file.exists():
+        # Check if it has data
+        try:
+            conn = duckdb.connect("duckdb_cars.db")
+            count = conn.execute("SELECT COUNT(*) FROM cars").fetchone()[0]
+            conn.close()
+            if count > 0:
+                logger.info(f"DuckDB already initialized with {count} rows")
+            else:
+                load_cars_to_duckdb()
+        except:
+            # Table doesn't exist
+            load_cars_to_duckdb()
+    else:
+        logger.info("Initializing DuckDB database...")
+        load_cars_to_duckdb()
+    
+    logger.info("Database initialization complete!")
 
