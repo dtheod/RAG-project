@@ -1,16 +1,13 @@
 from src.models import llm
+from src.schemas import (
+    FormatAgentSchema,
+    ClassifierAgentSchema
+)
 from src.logger import logger
 from langchain.chains import LLMMathChain
 from langchain.agents import Tool
-from langchain.prompts import ChatPromptTemplate
 from src.retrieval import search_cars_db, search_countries_db
-from ragas import evaluate
-from ragas.metrics import (
-    faithfulness,
-    answer_relevancy,
-    context_recall,
-    context_precision,
-)
+
 from datasets import Dataset
 from langchain.prompts.chat import (
     ChatPromptTemplate,
@@ -18,18 +15,21 @@ from langchain.prompts.chat import (
     HumanMessagePromptTemplate,
 )
 
-from langchain.chains import create_sql_query_chain
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 import duckdb
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent, SQLDatabaseToolkit
 from sqlalchemy import create_engine
 from langchain_core.tools import tool
+from langchain_core.prompts import PromptTemplate
+from langfuse import observe, Langfuse
+from langfuse.langchain import CallbackHandler
 
+# Initialize Langfuse client
+langfuse = Langfuse()
+langfuse_handler = CallbackHandler()
 
 # ==================== TOOL FUNCTIONS ====================
+
 
 @tool
 def query_cars_database(question: str) -> str:
@@ -43,9 +43,6 @@ def query_cars_database(question: str) -> str:
     Returns:
         Natural language answer based on SQL query results
     """
-    from langchain_community.utilities import SQLDatabase
-    from langchain_community.agent_toolkits import create_sql_agent, SQLDatabaseToolkit
-    from sqlalchemy import create_engine
     
     logger.info(f"SQL Tool executing query: {question}")
     
@@ -136,69 +133,35 @@ def search_cars_vector(query: str) -> str:
 
 # ==================== AGENT FUNCTIONS ====================
 
+
 def cars_agent(state):
-    """Handle car-related queries using ReAct agent with SQL and vector search tools."""
-    from langchain.agents import AgentExecutor, create_react_agent
-    from langchain_core.prompts import PromptTemplate
-    
+    """Handle car-related queries by always using both SQL and vector search tools."""
     query = state["query"]
-    logger.info(f"Cars agent (ReAct) processing query: {query}")
+    logger.info(f"Cars agent (Sequential) processing query: {query}")
     
-    # Define available tools
-    tools = [query_cars_database, search_cars_vector]
-    
-    # Create ReAct prompt
-    react_prompt = PromptTemplate.from_template(
-        """You are a car information expert with access to two tools:
-        1. query_cars_database: For counting, filtering, statistics (e.g., "How many cars...", "List cars with rating > X")
-        2. search_cars_vector: For detailed information about specific cars (e.g., "Tell me about Tesla Model S")
-        
-        Answer the following question as best you can. You have access to the following tools:
-
-        {tools}
-
-        Use the following format:
-
-        Question: the input question you must answer
-        Thought: you should always think about what to do
-        Action: the action to take, should be one of [{tool_names}]
-        Action Input: the input to the action
-        Observation: the result of the action
-        ... (this Thought/Action/Action Input/Observation can repeat N times)
-        Thought: I now know the final answer
-        Final Answer: the final answer to the original input question
-
-        Begin!
-
-        Question: {input}
-        Thought: {agent_scratchpad}"""
-    )
-    
-    # Create ReAct agent
-    agent = create_react_agent(llm, tools, react_prompt)
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=False,
-        handle_parsing_errors=True,
-        max_iterations=5,
-    )
-    
-    # Execute agent without callbacks to avoid tracing issues
     try:
-        result = agent_executor.invoke(
-            {"input": query},
-            config={"callbacks": []}
-        )
+        # Always call both tools
+        logger.info("Calling SQL database tool...")
+        sql_result = query_cars_database.invoke(query)
         
-        response = result.get("output", str(result))
+        logger.info("Calling vector search tool...")
+        vector_result = search_cars_vector.invoke(query)
+        
+        # Combine results with LLM
+        combine_prompt_object = langfuse.get_prompt("combine_prompt")
+        combine_prompt = combine_prompt_object.get_langchain_prompt()
+        
+        response = llm.invoke(combine_prompt, config={"callbacks": []})
         
         # Set state
-        state["response"] = response
-        state["contexts"] = [f"Tools used: {', '.join([t.name for t in tools])}"]
-        state["sources"] = ["ReAct Agent (SQL + Vector Search)"]
+        state["response"] = response.content
+        state["contexts"] = [
+            f"SQL Result: {sql_result[:200]}...",
+            f"Vector Result: {vector_result[:200]}..."
+        ]
+        state["sources"] = ["DuckDB SQL + Vector Search"]
         
-        logger.info(f"Cars agent completed successfully")
+        logger.info("Cars agent completed successfully using both tools")
         
     except Exception as e:
         logger.error(f"Cars agent error: {e}")
@@ -217,7 +180,7 @@ def cars_agent(state):
             ])
             
             formatted_prompt = car_prompt.format_messages(context=context, query=query)
-            llm_response = llm.invoke(formatted_prompt)
+            llm_response = llm.invoke(formatted_prompt, config={"callbacks": []})
             
             state["response"] = llm_response.content
             state["contexts"] = context_docs
@@ -236,22 +199,20 @@ def format_agent(state):
     query = state["query"]
 
 
-    format_prompt = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(
-            "You are an expert at formatting text to be clear and concise. "
-            "Fix any grammar or spelling issues. "
-            "DO NOT change the meaning of the query leave it as is."
-        ),
-        HumanMessagePromptTemplate.from_template(
-            "Query: {query}"
-        ),
-    ])
+    format_prompt_object = langfuse.get_prompt("format_prompt", version=3)
+    format_prompt = format_prompt_object.get_langchain_prompt()
+    
+    format_prompt = ChatPromptTemplate.from_template(format_prompt)
 
-    # Format the prompt with actual values
-    formatted_prompt = format_prompt.format_messages(query=query)
-    formatted_response = llm.invoke(formatted_prompt)
-    logger.info(f"Formatted response: {formatted_response.content}")
-    state["response"] = formatted_response.content
+    # Use structured output
+    structured_llm = llm.with_structured_output(FormatAgentSchema)
+    chain = format_prompt | structured_llm
+    
+    # Invoke chain
+    response = chain.invoke({"query": query}, config={"callbacks": []})
+    
+    logger.info(f"Formatted response: {response.formatted_query}")
+    state["formatted_query"] = response.formatted_query
     return state
 
 
@@ -265,20 +226,11 @@ def countries_agent(state):
     state["contexts"] = context_docs
     state["sources"] = [meta.get('source', 'Unknown') for meta in context_metadatas]
     
-    country_prompt = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(
-            "You are a country expert specialised in specific country information provided in the context. "
-            "If the information is not contained in the context answer 'Not able to answer the question I do not have the information in the context'."
-            "CRITICAL: Answer this question using the provided context."
-        ),
-        HumanMessagePromptTemplate.from_template(
-            "Context: {context}\n\nQuestion: {query}\n\nProvide a helpful answer about countries."
-        ),
-    ])
-
-    # Format the prompt with actual values
-    formatted_prompt = country_prompt.format_messages(context=context, query=query)
-    response = llm.invoke(formatted_prompt)
+    country_prompt_object = langfuse.get_prompt("countries_prompt")
+    country_prompt = country_prompt_object.get_langchain_prompt()
+    
+    # Format the prompt with context and query
+    response = llm.invoke(country_prompt, config={"callbacks": []})
     state["response"] = response.content
     return state
 
@@ -361,26 +313,42 @@ def sql_agent(state):
     
     return state
 
+
 def general_agent(state):
     """Handle general queries."""
     query = state["query"]
     
-    general_prompt = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(
-            "You are a helpful assistant "
-            "You will respond to the user that the query they asked cannot be answered by the current knowledge base."
-            "CRITICAL: You will only respond kindly that they should ask a different question"
-        ),
-        HumanMessagePromptTemplate.from_template(
-            "Question: {query}\n\nProvide a helpful answer about countries."
-        ),
-    ])
-
-    formatted_prompt = general_prompt.format_messages(query=query)
-    response = llm.invoke(formatted_prompt)
+    # Get prompt from Langfuse
+    general_prompt_object = langfuse.get_prompt("general_agent")
+    general_prompt = general_prompt_object.get_langchain_prompt()
+    
+    
+    response = llm.invoke(general_prompt, config={"callbacks": []})
     state["response"] = response.content
     return state
 
+def classifier_agent(state):
+    """Classify user query into categories: cars, countries, math, other."""
+    
+    query = state["query"]
+    formatted_query = state["formatted_query"]
+    
+    classifier_prompt_object = langfuse.get_prompt("classifier_prompt", version=4)
+    classifier_prompt = classifier_prompt_object.get_langchain_prompt()
+
+    classifier_prompt = ChatPromptTemplate.from_template(classifier_prompt)
+
+    structured_llm = llm.with_structured_output(ClassifierAgentSchema)
+    chain = classifier_prompt | structured_llm
+    
+    response = chain.invoke({"formatted_query": formatted_query}, config={"callbacks": []})
+    
+    # Ensure valid category
+    if response.category not in ["cars", "countries", "math", "other"]:
+        response.category = "other"
+    state["category"] = response.category
+    state["classifier_reason"] = response.reason
+    return state
 
 
 # def ragas_agent(state):
