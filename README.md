@@ -93,5 +93,27 @@ The cars agent automatically selects the appropriate tool:
 - **DuckDB**: SQL database
 - **Chainlit**: Web UI
 - **uv**: Package management
+- **Langfuse**: Observability and Tracing
+
+## 🔍 Observability with Langfuse
+
+This project is fully integrated with **Langfuse** for tracing and monitoring.
+
+### Setup
+Add your Langfuse credentials to `.env`:
+```env
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+### Features
+- **Full Traceability**: Every query generates a unique trace ID
+- **Session Tracking**: Group queries by user sessions
+- **Agent Monitoring**: Track performance of individual agents (Cars, Math, etc.)
+- **Tool Usage**: Monitor SQL vs Vector search tool selection
+- **Cost Tracking**: Track token usage and costs per query
+
+View your traces at [cloud.langfuse.com](https://cloud.langfuse.com).
 
 **Built with LangGraph 🦜🔗**
