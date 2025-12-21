@@ -1,15 +1,24 @@
 from langgraph.graph import StateGraph, END
 from typing import TypedDict
-from src.classifier import classify_query
-from src.agents import cars_agent, countries_agent, math_agent, general_agent, format_agent
+from src.agents import (
+    cars_agent,
+    countries_agent,
+    math_agent,
+    general_agent,
+    classifier_agent,
+    format_agent
+)
 from langchain.schema.runnable.config import RunnableConfig
 import chainlit as cl
+from langfuse.langchain import CallbackHandler
 
 from typing import List
 
 class State(TypedDict):
     query: str
+    formatted_query: str
     category: str
+    classifier_reason: str
     response: str
     contexts: List[str]
     sources: List[str]
@@ -33,7 +42,7 @@ def route_query(state):
 workflow = StateGraph(State)
 
 # Add nodes
-workflow.add_node("classifier", classify_query)
+workflow.add_node("classifier", classifier_agent)
 workflow.add_node("cars_agent", cars_agent)
 workflow.add_node("countries_agent", countries_agent)
 workflow.add_node("math_agent", math_agent)
@@ -63,7 +72,9 @@ workflow.add_edge("math_agent", END)
 workflow.add_edge("general_agent", END)
 
 # Compile the graph
-app = workflow.compile()
+
+langfuse_handler = CallbackHandler()
+app = workflow.compile().with_config({"callbacks": [langfuse_handler]})
 
 # Write graph to an image file
 png_graph = app.get_graph().draw_mermaid_png()
@@ -73,5 +84,6 @@ with open("./outputs/workflow_graph.png", "wb") as f:
 
 def process_query(query):
     """Process a query through the workflow."""
-    result = app.invoke({"query": query})
+
+    result = app.invoke({"query": query})    
     return result
